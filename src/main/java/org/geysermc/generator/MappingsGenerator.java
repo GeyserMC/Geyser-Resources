@@ -26,7 +26,9 @@ import net.minecraft.world.flag.FeatureFlags;
 import net.minecraft.world.item.*;
 import net.minecraft.world.item.crafting.Ingredient;
 import net.minecraft.world.item.enchantment.Enchantment;
+import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.*;
+import net.minecraft.world.level.block.state.BlockBehaviour;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.material.MapColor;
@@ -46,6 +48,7 @@ import org.reflections.Reflections;
 
 import java.awt.*;
 import java.io.*;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Type;
 import java.nio.file.FileSystem;
@@ -862,6 +865,18 @@ public class MappingsGenerator {
         }
     }
 
+    @SuppressWarnings("unchecked")
+    private static Optional<BlockBehaviour.OffsetFunction> getOffsetFunction(BlockState block) {
+        try {
+            Field offsetFunctionField = BlockBehaviour.BlockStateBase.class.getDeclaredField("offsetFunction");
+            offsetFunctionField.setAccessible(true);
+
+            return (Optional<BlockBehaviour.OffsetFunction>) offsetFunctionField.get(block);
+        } catch (ReflectiveOperationException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     public JsonObject getRemapBlock(BlockState state, String identifier) {
         JsonObject object = new JsonObject();
         BlockEntry blockEntry = BLOCK_ENTRIES.get(identifier);
@@ -959,9 +974,36 @@ public class MappingsGenerator {
         object.addProperty("bedrock_identifier", bedrockIdentifier);
 
         object.addProperty("block_hardness", state.getDestroySpeed(null, null));
+
+        if (state.hasOffsetFunction()) {
+            var offsetDataObject = new JsonObject();
+
+            offsetDataObject.addProperty("max_horizontal_offset", state.getBlock().getMaxHorizontalOffset());
+            offsetDataObject.addProperty("max_vertical_offset", state.getBlock().getMaxVerticalOffset());
+
+            var offsetFunction = getOffsetFunction(state).orElseThrow();
+            var vec = offsetFunction.evaluate(Blocks.GRASS.defaultBlockState(), EmptyBlockGetter.INSTANCE, new BlockPos(1, 2, 3));
+
+            String offsetType;
+            if (vec.y == 0.0) {
+                offsetType = "XZ";
+            } else {
+                offsetType = "XYZ";
+            }
+
+            offsetDataObject.addProperty("type", offsetType);
+
+            object.add("offset_data", offsetDataObject);
+        }
+
         List<List<Double>> collisionBoxes = Lists.newArrayList();
         try {
-            state.getCollisionShape(null, null).toAabbs().forEach(item -> {
+            var collisionShape = state.getCollisionShape(null, BlockPos.ZERO);
+            var offset = state.getOffset(null, BlockPos.ZERO);
+            var reversedOffset = offset.reverse();
+            var collisionShapeWithoutOffset = collisionShape.move(reversedOffset.x, reversedOffset.y, reversedOffset.z);
+
+            collisionShapeWithoutOffset.toAabbs().forEach(item -> {
                 List<Double> coordinateList = Lists.newArrayList();
                 // Convert Box class to an array of coordinates
                 // They need to be converted from min/max coordinates to centres and sizes
@@ -976,7 +1018,7 @@ public class MappingsGenerator {
                 collisionBoxes.add(coordinateList);
             });
         } catch (NullPointerException e) {
-            // Fallback to empty collision when the position is needed to calculate it
+            // Fallback to empty collision when a block getter is needed to calculate it
         }
 
         if (!COLLISION_LIST.contains(collisionBoxes)) {
